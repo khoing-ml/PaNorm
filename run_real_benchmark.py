@@ -72,19 +72,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device-ids", type=str, default=None, help="Comma-separated XPU/CUDA ids"
     )
-    parser.add_argument(
-        "--stream-worker-logs",
-        dest="stream_worker_logs",
-        action="store_true",
-        default=True,
-        help="Stream worker log lines to stdout while workers are running (default: enabled)",
-    )
-    parser.add_argument(
-        "--no-stream-worker-logs",
-        dest="stream_worker_logs",
-        action="store_false",
-        help="Disable live worker log streaming; logs are still saved to worker_*.log",
-    )
     parser.add_argument("--tmp-dir", type=str, default="exp/.tmp_real_bench")
     parser.add_argument("--overwrite", action="store_true", default=False)
     parser.add_argument("--append", action="store_true", default=False)
@@ -333,51 +320,17 @@ def run_orchestrator(args: argparse.Namespace) -> int:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env)
-        procs.append(
-            {
-                "proc": proc,
-                "log_f": log_f,
-                "log_path": log_path,
-                "offset": 0,
-                "worker_idx": worker_idx,
-            }
-        )
+        procs.append((proc, log_f, log_path))
         shard_paths.append(shard_path)
         expected_rows[str(shard_path)] = len(chunk)
 
     failed = False
-
-    def _flush_worker_logs(proc_items: list[dict], final: bool = False) -> None:
-        for item in proc_items:
-            log_path = item["log_path"]
-            if not log_path.exists():
-                continue
-            with log_path.open("r") as rf:
-                rf.seek(item["offset"])
-                chunk = rf.read()
-                item["offset"] = rf.tell()
-            if chunk:
-                for line in chunk.splitlines():
-                    print(f"[worker-{item['worker_idx']}] {line}")
-            if final:
-                item["log_f"].close()
-
-    if args.stream_worker_logs:
-        while any(item["proc"].poll() is None for item in procs):
-            _flush_worker_logs(procs)
-            time.sleep(1.0)
-
-        _flush_worker_logs(procs, final=True)
-    else:
-        for item in procs:
-            item["proc"].wait()
-            item["log_f"].close()
-
-    for item in procs:
-        ret = item["proc"].returncode
+    for proc, log_f, log_path in procs:
+        ret = proc.wait()
+        log_f.close()
         if ret != 0:
             failed = True
-            print(f"Worker failed (exit={ret}). Check log: {item['log_path']}")
+            print(f"Worker failed (exit={ret}). Check log: {log_path}")
 
     if failed:
         return 1
