@@ -73,6 +73,12 @@ def parse_args() -> argparse.Namespace:
         "--device-ids", type=str, default=None, help="Comma-separated XPU/CUDA ids"
     )
     parser.add_argument("--tmp-dir", type=str, default="exp/.tmp_real_bench")
+    parser.add_argument(
+        "--print-worker-logs",
+        action="store_true",
+        default=False,
+        help="Print worker logs to terminal instead of redirecting to worker_*.log files.",
+    )
     parser.add_argument("--overwrite", action="store_true", default=False)
     parser.add_argument("--append", action="store_true", default=False)
 
@@ -316,21 +322,31 @@ def run_orchestrator(args: argparse.Namespace) -> int:
         if args.max_test_samples is not None:
             cmd += ["--max-test-samples", str(args.max_test_samples)]
 
-        log_f = log_path.open("w")
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env)
-        procs.append((proc, log_f, log_path))
+        if args.print_worker_logs:
+            proc = subprocess.Popen(cmd, env=env)
+            procs.append((proc, None, log_path))
+        else:
+            log_f = log_path.open("w")
+            proc = subprocess.Popen(
+                cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env
+            )
+            procs.append((proc, log_f, log_path))
         shard_paths.append(shard_path)
         expected_rows[str(shard_path)] = len(chunk)
 
     failed = False
     for proc, log_f, log_path in procs:
         ret = proc.wait()
-        log_f.close()
+        if log_f is not None:
+            log_f.close()
         if ret != 0:
             failed = True
-            print(f"Worker failed (exit={ret}). Check log: {log_path}")
+            if args.print_worker_logs:
+                print(f"Worker failed (exit={ret}).")
+            else:
+                print(f"Worker failed (exit={ret}). Check log: {log_path}")
 
     if failed:
         return 1
