@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import json
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -40,6 +41,14 @@ class BenchmarkConfig:
     mixup_alpha: float = 0.0
     cutmix_alpha: float = 0.0
     warmup_epochs: int = 0
+    wandb_enabled: bool = False
+    wandb_project: str = ""
+    wandb_entity: str = ""
+    wandb_mode: str = ""
+    wandb_group: str = ""
+    wandb_job_type: str = "train"
+    wandb_tags: str = ""
+    wandb_run_name: str = ""
 
 
 def set_seed(seed: int) -> None:
@@ -117,6 +126,81 @@ def _mixup_criterion(
 ):
 
     return lam * criterion(logits, y_a) + (1 - lam) * criterion(logits, y_b)
+
+
+def _parse_csv_tags(value: str) -> list[str]:
+    return [tag.strip() for tag in value.split(",") if tag.strip()]
+
+
+def _maybe_init_wandb(
+    config: BenchmarkConfig,
+    dataset: str,
+    method: str,
+    seed: int,
+    protocol: str,
+    image_size: int,
+    num_params_m: float,
+):
+    if not config.wandb_enabled:
+        return None
+
+    try:
+        import wandb
+    except ImportError:
+        print("wandb is enabled but not installed; continuing without logging.")
+        return None
+
+    init_kwargs: dict[str, Any] = {
+        "project": config.wandb_project or os.environ.get("WANDB_PROJECT") or "panorm",
+        "entity": config.wandb_entity or os.environ.get("WANDB_ENTITY") or None,
+        "mode": config.wandb_mode or os.environ.get("WANDB_MODE") or "",
+        "group": config.wandb_group or os.environ.get("WANDB_GROUP") or None,
+        "job_type": config.wandb_job_type or os.environ.get("WANDB_JOB_TYPE") or "train",
+        "name": config.wandb_run_name
+        or f"{dataset}-{config.architecture}-{method}-seed{seed}",
+        "tags": _parse_csv_tags(config.wandb_tags or os.environ.get("WANDB_TAGS", "")),
+        "reinit": True,
+        "config": {
+            **asdict(config),
+            "dataset": dataset,
+            "method": method,
+            "seed": seed,
+            "protocol": protocol,
+            "image_size": image_size,
+            "num_params_m": num_params_m,
+        },
+    }
+
+    init_kwargs = {k: v for k, v in init_kwargs.items() if v not in (None, "", [])}
+    try:
+        run = wandb.init(**init_kwargs)
+        try:
+            wandb.define_metric("epoch")
+            wandb.define_metric("*", step_metric="epoch")
+        except Exception:
+            pass
+        return run
+    except Exception as exc:
+        print(f"wandb init failed; continuing without logging ({exc})")
+        return None
+
+
+def _wandb_log(run, data: dict[str, Any], step: int | None = None) -> None:
+    if run is None:
+        return
+    try:
+        run.log(data, step=step)
+    except Exception:
+        pass
+
+
+def _wandb_finish(run) -> None:
+    if run is None:
+        return
+    try:
+        run.finish()
+    except Exception:
+        pass
 
 
 @torch.no_grad()
@@ -288,6 +372,7 @@ def run_single_experiment(
     set_seed(seed)
     device = resolve_device(device_id)
     use_amp = bool(config.use_amp and device.type in {"xpu", "cuda"})
+    wandb_run = None
 
     train_loader, test_loader, info = build_dataloaders(
         dataset_name=dataset,
@@ -313,6 +398,15 @@ def run_single_experiment(
 
     num_params_m = sum(p.numel() for p in model.parameters()) / 1e6
     protocol = _build_protocol(config, dataset, image_size)
+    wandb_run = _maybe_init_wandb(
+        config=config,
+        dataset=dataset,
+        method=method,
+        seed=seed,
+        protocol=protocol,
+        image_size=image_size,
+        num_params_m=num_params_m,
+    )
 
     criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
     if config.optimizer == "sgd":
@@ -410,6 +504,19 @@ def run_single_experiment(
         if failure_reason is not None:
             break
         scheduler.step()
+        if wandb_run is not None:
+            _wandb_log(
+                wandb_run,
+                {
+                    "epoch": epoch_idx,
+                    "train/loss": float(epoch_loss_sum / max(epoch_samples, 1)),
+                    "train/grad_norm_mean": (
+                        float(np.mean(epoch_grad_norms)) if epoch_grad_norms else 0.0
+                    ),
+                    "train/lr": float(optimizer.param_groups[0]["lr"]),
+                },
+                step=epoch_idx,
+            )
         if config.log_dynamics:
             epoch_test = evaluate(model, test_loader, criterion, device)
             epoch_gate = _collect_gate_statistics(model)
@@ -425,6 +532,18 @@ def run_single_experiment(
                     **{k: float(v) for k, v in epoch_gate.items()},
                 }
             )
+            if wandb_run is not None:
+                _wandb_log(
+                    wandb_run,
+                    {
+                        "epoch": epoch_idx,
+                        "test/loss": float(epoch_test["loss"]),
+                        "test/acc1": float(epoch_test["acc1"]),
+                        "test/acc5": float(epoch_test["acc5"]),
+                        **{f"gate/{k}": float(v) for k, v in epoch_gate.items()},
+                    },
+                    step=epoch_idx,
+                )
 
     elapsed = time.time() - start
 
@@ -448,13 +567,31 @@ def run_single_experiment(
         )
 
     if failure_reason is not None:
-        return _make_error_result(failure_reason)
+        result = _make_error_result(failure_reason)
+        _wandb_log(
+            wandb_run,
+            {f"final/{k}": v for k, v in result.items() if k != "dynamics"},
+        )
+        _wandb_finish(wandb_run)
+        return result
 
     metrics = evaluate(model, test_loader, criterion, device)
     if not float(metrics["loss"]) == float(metrics["loss"]):
-        return _make_error_result("nonfinite_test_loss")
+        result = _make_error_result("nonfinite_test_loss")
+        _wandb_log(
+            wandb_run,
+            {f"final/{k}": v for k, v in result.items() if k != "dynamics"},
+        )
+        _wandb_finish(wandb_run)
+        return result
     if not bool(np.isfinite([metrics["loss"], metrics["acc1"], metrics["acc5"]]).all()):
-        return _make_error_result("nonfinite_test_metrics")
+        result = _make_error_result("nonfinite_test_metrics")
+        _wandb_log(
+            wandb_run,
+            {f"final/{k}": v for k, v in result.items() if k != "dynamics"},
+        )
+        _wandb_finish(wandb_run)
+        return result
 
     gate_stats = _collect_gate_statistics(model)
 
@@ -485,7 +622,7 @@ def run_single_experiment(
         ood_gate_stats = _collect_gate_statistics(model)
         ood_metrics.update({f"ood_{k}": v for k, v in ood_gate_stats.items()})
 
-    return _build_result_dict(
+    result = _build_result_dict(
         dataset=dataset,
         config=config,
         method=method,
@@ -503,3 +640,19 @@ def run_single_experiment(
         ood_metrics=ood_metrics,
         dynamics=dynamics if config.log_dynamics else None,
     )
+
+    _wandb_log(
+        wandb_run,
+        {f"final/{k}": v for k, v in result.items() if k != "dynamics"},
+    )
+    if config.log_dynamics and wandb_run is not None and dynamics:
+        try:
+            import wandb
+
+            columns = list(dynamics[0].keys())
+            rows = [[row.get(column) for column in columns] for row in dynamics]
+            wandb_run.log({"dynamics": wandb.Table(columns=columns, data=rows)})
+        except Exception:
+            pass
+    _wandb_finish(wandb_run)
+    return result

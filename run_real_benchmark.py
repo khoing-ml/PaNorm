@@ -34,6 +34,7 @@ DEFAULT_METHODS = (
 )
 DEFAULT_DATASETS = "cifar10,cifar100,svhn,stl10"
 DEFAULT_ARCHITECTURES = "smallcnn,resnet18"
+WANDB_DEFAULTS: dict[str, object] = {}
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +59,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ood-severity", type=int, default=2)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-test-samples", type=int, default=None)
+    parser.add_argument("--wandb-enabled", action="store_true", default=False)
+    parser.add_argument("--wandb-project", type=str, default="")
+    parser.add_argument("--wandb-entity", type=str, default="")
+    parser.add_argument("--wandb-mode", type=str, default="")
+    parser.add_argument("--wandb-group", type=str, default="")
+    parser.add_argument("--wandb-job-type", type=str, default="train")
+    parser.add_argument("--wandb-tags", type=str, default="")
+    parser.add_argument("--wandb-run-name", type=str, default="")
 
     parser.add_argument("--data-root", type=str, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--output", type=str, default="exp/result.csv")
@@ -88,6 +97,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-id", type=int, default=0)
 
     return parser.parse_args()
+
+
+def wandb_defaults_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "wandb_enabled": bool(args.wandb_enabled),
+        "wandb_project": args.wandb_project,
+        "wandb_entity": args.wandb_entity,
+        "wandb_mode": args.wandb_mode,
+        "wandb_group": args.wandb_group,
+        "wandb_job_type": args.wandb_job_type,
+        "wandb_tags": args.wandb_tags,
+        "wandb_run_name": args.wandb_run_name,
+    }
 
 
 def parse_csv_arg(value: str) -> list[str]:
@@ -154,6 +176,7 @@ def run_worker(args: argparse.Namespace) -> int:
         ood_severity=args.ood_severity,
         max_train_samples=args.max_train_samples,
         max_test_samples=args.max_test_samples,
+        **WANDB_DEFAULTS,
     )
 
     rows = []
@@ -321,6 +344,22 @@ def run_orchestrator(args: argparse.Namespace) -> int:
             cmd += ["--max-train-samples", str(args.max_train_samples)]
         if args.max_test_samples is not None:
             cmd += ["--max-test-samples", str(args.max_test_samples)]
+        if args.wandb_enabled:
+            cmd += ["--wandb-enabled"]
+        if args.wandb_project:
+            cmd += ["--wandb-project", args.wandb_project]
+        if args.wandb_entity:
+            cmd += ["--wandb-entity", args.wandb_entity]
+        if args.wandb_mode:
+            cmd += ["--wandb-mode", args.wandb_mode]
+        if args.wandb_group:
+            cmd += ["--wandb-group", args.wandb_group]
+        if args.wandb_job_type:
+            cmd += ["--wandb-job-type", args.wandb_job_type]
+        if args.wandb_tags:
+            cmd += ["--wandb-tags", args.wandb_tags]
+        if args.wandb_run_name:
+            cmd += ["--wandb-run-name", args.wandb_run_name]
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -420,6 +459,8 @@ def run_orchestrator(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    global WANDB_DEFAULTS
+    WANDB_DEFAULTS = wandb_defaults_from_args(args)
     if args.worker:
         return run_worker(args)
     return run_orchestrator(args)

@@ -555,10 +555,10 @@ def build_dataloaders(
         )
 
     train_set = _load_dataset(
-        dataset_name, data_root, train=True, download=False, transform=train_tf
+        dataset_name, data_root, train=True, download=True, transform=train_tf
     )
     test_set = _load_dataset(
-        dataset_name, data_root, train=False, download=False, transform=test_tf
+        dataset_name, data_root, train=False, download=True, transform=test_tf
     )
 
     train_set = _build_subset(train_set, max_train_samples, seed)

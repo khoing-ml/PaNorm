@@ -27,6 +27,7 @@ from real_bench.efficiency import profile_model
 
 DEFAULT_DATA_ROOT = "/lus/flare/projects/RobustViT/kim/pa_norm/data"
 RESULT_CSV = "exp/result.csv"
+WANDB_DEFAULTS: dict[str, object] = {}
 
 
 CORE_METHODS = [
@@ -68,6 +69,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", type=str, default=RESULT_CSV)
     p.add_argument("--device-id", type=int, default=0)
     p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--wandb-enabled", action="store_true", default=False)
+    p.add_argument("--wandb-project", type=str, default="")
+    p.add_argument("--wandb-entity", type=str, default="")
+    p.add_argument("--wandb-mode", type=str, default="")
+    p.add_argument("--wandb-group", type=str, default="")
+    p.add_argument("--wandb-job-type", type=str, default="train")
+    p.add_argument("--wandb-tags", type=str, default="")
+    p.add_argument("--wandb-run-name", type=str, default="")
     p.add_argument(
         "--group",
         type=str,
@@ -103,6 +112,19 @@ def parse_args() -> argparse.Namespace:
         ],
     )
     return p.parse_args()
+
+
+def wandb_defaults_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "wandb_enabled": bool(args.wandb_enabled),
+        "wandb_project": args.wandb_project,
+        "wandb_entity": args.wandb_entity,
+        "wandb_mode": args.wandb_mode,
+        "wandb_group": args.wandb_group,
+        "wandb_job_type": args.wandb_job_type,
+        "wandb_tags": args.wandb_tags,
+        "wandb_run_name": args.wandb_run_name,
+    }
 
 
 def write_csv_row(path: Path, row: dict) -> None:
@@ -179,6 +201,7 @@ def run_group(
     device_id: int,
     protocol_prefix: str = "",
 ) -> int:
+    config = replace(config, **WANDB_DEFAULTS)
 
     total = len(datasets) * len(architectures) * len(methods) * len(seeds)
     done = 0
@@ -300,6 +323,8 @@ def run_efficiency(
 
 def main() -> int:
     args = parse_args()
+    global WANDB_DEFAULTS
+    WANDB_DEFAULTS = wandb_defaults_from_args(args)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     group = args.group
